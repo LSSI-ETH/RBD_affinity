@@ -1,0 +1,263 @@
+---
+title: "Data analysis"
+author: "hjm"
+date: "2025-03-03"
+output: html_document
+---
+
+# This file gives step by step data analysis and figure generation code for study "High throughput analysis of SARS CoV-2 receptor binding domain variants"
+
+```{r}
+source("RBD_tree_functions.R")
+source("utils.R")
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(gridExtra)
+library(car)
+library(purrr)
+library(igraph)
+library(tidyverse)
+library(scales)
+library(qgraph)
+```
+
+```{r}
+#read data
+
+df_bam<-read.delim(file = "mutations_bamlanivimab.txt",sep = ",")
+df_DBR3<-read.delim(file = "mutations_DBR3.txt",sep = ",")
+df_imd<-read.delim(file = "mutations_imdevimab.txt",sep = ",")
+binding_site<-read.csv("EPFLbindingsite.csv")
+```
+
+```{r}
+check_within_CI(df_DBR3)
+check_within_CI(df_bam)
+check_within_CI(df_imd)
+```
+
+```{r}
+df_DBR3<-normalise_df(df_DBR3)
+df_bam<-normalise_df(df_bam)
+df_imd<-normalise_df(df_imd)
+```
+
+```{r}
+df1<-mean_affinity_by_variant(df_bam)
+df2<-mean_affinity_by_variant(df_DBR3)
+df3<-mean_affinity_by_variant(df_imd)
+```
+
+```{r}
+mut_score1 <- single_mutation_score(df1)
+mut_score2 <- single_mutation_score(df2)
+mut_score3 <- single_mutation_score(df3)
+```
+
+
+```{r}
+p1<-plot_affinity_change(mut_score1)
+p2<-plot_affinity_change(mut_score2)
+p3<-plot_affinity_change(mut_score3)
+
+p<-grid.arrange(p3, p1, p2, ncol = 1)
+
+ggsave("single_mutation_barplot.pdf", p,width = 15, height = 20)
+```
+
+```{r}
+mut2_score1<-two_mutation_score(df1)
+mut2_score2<-two_mutation_score(df2)
+mut2_score3<-two_mutation_score(df3)
+mut2_score1$antibody <- "Bamlanivimab"
+mut2_score2$antibody <- "DBR3"
+mut2_score3$antibody <- "Imdevimab"
+```
+
+```{r}
+p1<-plot_synergestic2(mut2_score1)
+p2<-plot_synergestic2(mut2_score2)
+p3<-plot_synergestic2(mut2_score3)
+
+p<-grid.arrange(p3, p1, p2, ncol = 1)
+ 
+ggsave("synergistic2_Ime_bam_DBR3.pdf", p,width = 15, height = 20)
+```
+
+```{r}
+mut3_score1<-three_mutation_score(df1)
+mut3_score2<-three_mutation_score(df2)
+mut3_score3<-three_mutation_score(df3)
+```
+
+```{r}
+p1<-plot_synergestic3(mut3_score1) #Bam
+p2<-plot_synergestic3(mut3_score2) #DBR3
+p3<-plot_synergestic3(mut3_score3) #Imd
+
+p<-grid.arrange(p1, p3, p2, ncol = 3)
+ggsave("synergistic3_ranked.pdf", p,width = 20, height = 50,limitsize = FALSE)
+```
+
+```{r}
+# Do Tukey test to see difference on combination of mutation binding affinity decrease comparing to the individual mutation
+
+mut3_score1 <- mut3_score1 %>% mutate(Antibody = "Bamlanivimab")
+mut3_score2 <- mut3_score2 %>% mutate(Antibody = "DBR3_03")
+mut3_score3 <- mut3_score3 %>% mutate(Antibody = "Imdevimab")
+
+combined_data <- bind_rows(mut3_score1, mut3_score2, mut3_score3)
+
+long_data <- combined_data %>% 
+   filter(Mean_Affinity_WT_3mut < 1) %>% 
+  select(Mutations, Mean_Affinity_WT_3mut, Antibody)
+
+anova_result <- aov(Mean_Affinity_WT_3mut ~ Antibody, data = long_data)
+
+summary(anova_result)
+tukey_result <- TukeyHSD(anova_result)
+
+# Print Tukey's test results
+print(tukey_result)
+
+
+```
+
+```{r}
+#Violin plot to compare fold changes in three antibodies
+mut3_score1 <- mut3_score1 %>% filter(fold_change != max(fold_change, na.rm = TRUE))
+combined_data <- bind_rows(mut3_score3, mut3_score1, mut3_score2) %>%
+  filter(fold_change < 1) 
+
+g <- ggplot(combined_data, aes(x = Antibody, y = fold_change, fill = Antibody)) +
+  geom_violin(trim = FALSE, scale = "width", color = "black") +  # Violin plots with black borders
+  labs(title = "Fold Change Distribution by Antibody",
+       x = "Antibody",
+       y = "Fold Change") +
+  theme_minimal() +
+  scale_x_discrete(limits = c("Imdevimab", "Bamlanivimab", "DBR3_03")) + # Ensure order
+  scale_y_continuous(breaks = seq(0, 1.2, by = 0.2), limits = c(-0.2, 1.4)) + 
+  scale_fill_manual(values = c("Imdevimab" = "#abd7aa", 
+                               "Bamlanivimab" = "#27bfbf", 
+                               "DBR3_03" = "#a1bf3a")) +  # Custom colors
+  theme(
+    legend.position = "none",  # Remove legend
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+          panel.grid.major = element_blank(),  # Remove major grid lines
+    panel.grid.minor = element_blank(), # Rotate x-axis labels if needed
+  )+
+  # Add significance brackets and asterisks
+    geom_segment(aes(x = 1, xend = 2, y = 1.1, yend = 1.1), color = "black") +  # Imdevimab vs. Bamlanivimab
+    geom_text(aes(x = 1.5, y = 1.15, label = "*"), size = 5) +  # Add * for p = 0.0363
+
+    geom_segment(aes(x = 2, xend = 3, y = 1.2, yend = 1.2), color = "black") +  # Bamlanivimab vs. DBR3_03
+    geom_text(aes(x = 2.5, y = 1.25, label = "***"), size = 5) +  # Add *** for p < 0.0001
+
+    geom_segment(aes(x = 1, xend = 3, y = 1.3, yend = 1.3), color = "black") +  # Imdevimab vs. DBR3_03
+    geom_text(aes(x = 2, y = 1.35, label = "***"), size = 5)  # Add *** for p < 0.0001
+
+ggsave("violin_foldchange.pdf", g, width = 8, height = 4)
+```
+
+```{r}
+g1<-plot_network(mut2_score1,binding_site)
+g2<-plot_network(mut2_score2,binding_site)
+g3<-plot_network(mut2_score3,binding_site)
+
+
+pdf("igrpah3_new.pdf", width = 13, height = 5)
+par(mfrow = c(1, 3))
+plot_qgraph(g1)
+plot_qgraph(g3)
+plot_qgraph(g2)
+
+legend("topright",               
+       legend = names(category_colors), 
+       col = category_colors,    
+       pch = 16,                  
+       pt.cex = 1.5,             
+       cex = 1.5,                 
+       bty = "n") 
+dev.off()
+```
+
+```{r}
+
+ mut_score1$Antibody <- "Bamlanivimab"
+ mut_score2$Antibody <- "DBR3_03"
+ mut_score3$Antibody <- "Imdevimab"
+
+merged_mut_df <- bind_rows(mut_score1, mut_score2, mut_score3) %>%
+  select(Antibody, Mutations, Mean_Affinity_WT) %>%
+  pivot_wider(names_from = Antibody, values_from = Mean_Affinity_WT)
+
+heatmap_matrix <- as.matrix(merged_mut_df[,-1])  
+rownames(heatmap_matrix) <- merged_mut_df$Mutations
+
+desired_order <- c("Imdevimab", "Bamlanivimab", "DBR3_03")
+heatmap_matrix <- heatmap_matrix[, desired_order]
+
+my_colors <- colorRampPalette(c("darkred", "beige", "#00518d"))(100)
+
+heatmap_min <- min(heatmap_matrix, na.rm = TRUE)  
+heatmap_max <- max(heatmap_matrix, na.rm = TRUE)
+breaks_list <- seq(heatmap_min, heatmap_max, length.out = 101)  # Scale from min to max
+
+pdf("pheatmap_mut_affinity.pdf", width = 4, height = 6)  # Adjust size as needed
+
+pheatmap(heatmap_matrix,
+         color = my_colors,          # Use correct color mapping
+         breaks = breaks_list,       # Ensure color scale remains correct
+         cluster_rows = FALSE,       # Keep row order (mutations)
+         cluster_cols = TRUE,        # Enable column clustering
+         scale = "none",
+         main = "Mean Relative Affinity of Mutations",
+         fontsize = 10,
+         legend = TRUE,              # Show normal legend
+         show_rownames = TRUE,       # Show mutation names
+         angle_col = 0,              # Make antibody names horizontal
+         border_color = NA)          # Remove grid lines between cells
+dev.off()  # Close the PDF device
+```
+
+```{r}
+# This code block plots metrics from model training.
+plot_antibody_metrics <- function(data, antibody_name) {
+  # Filter data for the specific antibody
+  df_subset <- data %>% filter(Antibody == antibody_name)
+  
+  # Define custom colors for the embeddings
+  embedding_colors <- c("#3963ac", "#08400e", "#a11e5c")
+
+  # Plot
+  p <- ggplot(df_subset, aes(x = Model, y = Spearman_Mean, fill = Embedding)) +
+    geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) + 
+    geom_errorbar(aes(ymin = Spearman_Mean - Spearman_Std, ymax = Spearman_Mean + Spearman_Std),
+                  position = position_dodge(width = 0.8), width = 0.3, size = 0.3) +  # Thinner error bars
+    labs(title = antibody_name,
+         x = "Model",
+         y = "Spearman's correlation coefficient",
+         fill = "Embedding") +
+    theme_minimal() +  # Keeps a clean background while keeping axes visible
+    theme(
+      legend.position = "right",
+      legend.title = element_blank(),
+      plot.title = element_text(hjust = 0.5, face = "bold"),  # Center title
+      axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, color = "black"),  # X-axis labels horizontal & centered
+      axis.title.x = element_text(margin = margin(t = 10)),  # Space between x-label and x-axis
+      axis.line = element_line(color = "black", size = 0.3),  # Thinner axis lines
+      axis.ticks.y = element_line(size = 0.3),  # Thinner tick marks
+      panel.grid = element_blank()  # Remove grid lines for a cleaner look
+    ) +
+    scale_y_continuous(limits = c(y_min, y_max), breaks = seq(y_min, y_max, by = 0.2)) +
+    scale_fill_manual(values = embedding_colors, guide = guide_legend(override.aes = list(color = NA)))  # Set custom colors for embeddings
+
+  # Save plot as PDF
+  pdf_filename <- paste0("Spearman_", antibody_name, ".pdf")
+  ggsave(pdf_filename, plot = p, width = 8, height = 2.5)
+}
+```
+
