@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import math
+import joblib 
 from datetime import datetime
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, ConstantKernel, WhiteKernel
@@ -16,10 +17,17 @@ from xgboost import XGBRegressor
 from sklearn.preprocessing import PolynomialFeatures
 import torch
 import matplotlib.pyplot as plt
-from utils import k_fold_cv, record_metrics
+from utils import ModelEvaluator
 import gc  # Garbage collector
 import argparse
 from sklearn.svm import SVR
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.base import clone
+from sklearn.utils.validation import check_is_fitted
+from sklearn.exceptions import NotFittedError
+from model_definitions import get_model_configs
 
 parser = argparse.ArgumentParser(description='Train GP and MLP models on embeddings.')
 
@@ -51,18 +59,57 @@ pool_method = args.pool_method
 pool_axis = args.pool_axis
 y_name = args.y_name
 task_name = args.task_name
-
+use_poly = False
 # ---------------------
-# Model Toggles
-use_gp = True
-use_lr = True
-use_mlp = True
-use_ridge = True
-use_svm = True
-use_elastic_net = True
-use_random_forest = True
-use_xgboost = True
+use_flags = {
+    "use_gp": True,
+    "use_lr": True,
+    "use_mlp": True,
+    "use_ridge": True,
+    "use_elastic_net": True,
+    "use_random_forest": True,
+    "use_xgboost": True,
+    "use_svm": True
+}
 
+#------
+param_grids = {
+    # "GP": {"alpha": [1e-10, 1e-6, 1e-3]},  # Uncomment if needed and used directly
+    "MLP": {
+        "mlpregressor__hidden_layer_sizes": [(64,), (128,), (256,)],
+        "mlpregressor__learning_rate_init": [0.0001, 0.001, 0.01],
+        "mlpregressor__alpha": [0.0001, 0.001, 0.01]
+    },
+    "Ridge": {
+        "ridge__alpha": [0.1, 1, 10, 100]
+    },
+    "ElasticNet": {
+        "elasticnet__alpha": [0.001, 0.01, 0.1],
+        "elasticnet__l1_ratio": [0.2, 0.5, 0.8]
+    },
+    "RandomForest": {
+        "randomforestregressor__n_estimators": [100, 1000],
+        "randomforestregressor__max_depth": [None, 10, 20]
+    },
+    "XGBoost": {
+        "xgbregressor__n_estimators": [50, 100],
+        "xgbregressor__max_depth": [6, 10],
+        "xgbregressor__learning_rate": [0.01, 0.1]
+    },
+    "SVR_rbf": {
+        "svr__C": [1,10,100],
+        "svr__epsilon": [0.001, 0.01, 0.1],
+        "svr__gamma": ["scale", "auto"]
+    },
+    "SVR_linear": {
+        "svr__C": [0.01, 0.1, 1],
+        "svr__epsilon": [0.001, 0.01, 0.1]
+    }
+}
+
+model_configs = get_model_configs(param_grids, use_flags)
+
+#--------
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 now = datetime.now()
@@ -75,7 +122,6 @@ tensor_str = f"{task_name}_{embedding}_layer{esm_layer}_{pool_method}pool{pool_a
 embed_str = f"{embedding}_layer{esm_layer}_{pool_method}pool{pool_axis}"
 model_str = f"{y_name}_{tensor_str}_mlpdim{mlp_hidden_dim}_gplen{length_scale}"
 
-
 df = pd.read_csv(data_path)
 y_all = df[y_name].values
 print(data_path)
@@ -85,14 +131,14 @@ print(f'unique_antibodies:{unique_antibodies}')
 
 Mutations_all = df['Mutations']
 
-plot_dir = f'{now}_{model_str}_result'
+plot_dir = f'{now}_{model_str}_gpseed0'
 if not os.path.exists(plot_dir):
     os.makedirs(plot_dir)
 
 df = pd.read_csv(data_path)
 y_all = df['Mean_Relative_Affinity'].values
 
-X_all = torch.load(f'/cluster/project/reddy/jiahan/{tensor_str}_tensor.pt')
+X_all = torch.load(f'/cluster/project/reddy/jiahan/{tensor_str}_tensor.pt') 
 print("read X in")
 print(X_all.shape)
 
@@ -106,90 +152,36 @@ for antibody in unique_antibodies:
     y = y_all[mask]
     mutations = Mutations_all[mask]
 
-    # Initialize polynomial features for Ridge and ElasticNet
-    poly = PolynomialFeatures(degree=2)
-
-    # Dictionary to store metrics for all models
-    metrics = {
-        'Antibody': [],
-        'Model': [],
-        'MSE_Mean': [], 'MSE_Std': [],
-        'Pearson_Mean': [], 'Pearson_Std': [],
-        'Spearman_Mean': [], 'Spearman_Std': [],
-        'R2_Mean': [], 'R2_Std': [],
-        'Under_Most_Inaccurate': [],
-        'Over_Most_Inaccurate': []
-    }
-    def record_metrics(model_name, results):
-        metrics['Antibody'].append(antibody)
-        metrics['Model'].append(model_name)
-        metrics['MSE_Mean'].append(results['MSE'][0])
-        metrics['MSE_Std'].append(results['MSE'][1])
-        metrics['Pearson_Mean'].append(results['Pearson Correlation'][0])
-        metrics['Pearson_Std'].append(results['Pearson Correlation'][1])
-        metrics['Spearman_Mean'].append(results['Spearman Correlation'][0])
-        metrics['Spearman_Std'].append(results['Spearman Correlation'][1])
-        metrics['R2_Mean'].append(results['R2'][0])
-        metrics['R2_Std'].append(results['R2'][1])
-        metrics['Under_Most_Inaccurate'].append(results['Under Most Inaccurate'])
-        metrics['Over_Most_Inaccurate'].append(results['Over Most Inaccurate'])
-
-   # ----- GP model -----
-    if use_gp:
-        kernel = ConstantKernel(1.0, (1e-2, 1000)) * RBF(1.0, (1, 50)) + WhiteKernel(noise_level=1, noise_level_bounds=(1e-3, 1))
-        gp = GaussianProcessRegressor(kernel=kernel, random_state=0, n_restarts_optimizer=10, normalize_y=True)
-        gp_metrics = k_fold_cv(X, y, gp, mutations=mutations)
-        record_metrics('GP', gp_metrics)
-
-    # ----- Linear Regression -----
-    if use_lr:
-        lr_model = LinearRegression()
-        lr_metrics = k_fold_cv(X, y, lr_model, mutations=mutations)
-        record_metrics('Linear Regression', lr_metrics)
-
-    # ----- MLP -------
-    if use_mlp:
-        mlp = MLPRegressor(hidden_layer_sizes=(64,), batch_size=64, activation='relu', solver='adam', max_iter=1000, alpha=0.01, learning_rate_init=0.0001, random_state=42)
-        mlp_metrics = k_fold_cv(X, y, mlp, mutations=mutations)
-        record_metrics('MLP', mlp_metrics)
-
-    # ----- Ridge -----
-    if use_ridge:
-        ridge_reg = Ridge(alpha=7.05)
-        ridge_metrics = k_fold_cv(X, y, ridge_reg, poly=poly, mutations=mutations)
-        record_metrics('Ridge', ridge_metrics)
-
-    # ----- ElasticNet -----
-    if use_elastic_net:
-        elastic_net = ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42, max_iter=1000)
-        elastic_net_metrics = k_fold_cv(X, y, elastic_net, poly=poly, mutations=mutations)
-        record_metrics('ElasticNet', elastic_net_metrics)
-
-    # ----- Random Forest -----
-    if use_random_forest:
-        rf = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
-        rf_metrics = k_fold_cv(X, y, rf, mutations=mutations)
-        record_metrics('Random Forest', rf_metrics)
-
-    # ----- XGBoost -----
-    if use_xgboost:
-        xgb = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=10, random_state=42)
-        xgb_metrics = k_fold_cv(X, y, xgb, mutations=mutations)
-        record_metrics('XGBoost', xgb_metrics)
-    
-    if use_svm:
-        svr = SVR(kernel='rbf', C=1.0, epsilon=0.1)
-        svm_metrics = k_fold_cv(X, y, svr, mutations=mutations)
-        record_metrics('SVM_rbf', svm_metrics)
-        
-        svr = SVR(kernel='linear', C=1.0, epsilon=0.1)
-        svm_metrics = k_fold_cv(X, y, svr, mutations=mutations)
-        record_metrics('SVM_linear', svm_metrics)
-    # Append metrics to the consolidated DataFrame
-    metrics_df = pd.concat([metrics_df, pd.DataFrame(metrics)])
+    for cfg in model_configs:
+        if cfg["enabled"]:
+            print(f"\nNow evaluating: {cfg['name']}")
+            poly_features = None
+            if use_poly:
+                if embedding.lower() == "onehot" and cfg["name"] in ["Linear Regression", "Ridge", "ElasticNet", "SVM_linear"] or \
+                embedding.lower() == "16encode" and cfg["name"] in ["Ridge", "ElasticNet"]:
+                    print(f'using poly for {embedding}_{cfg["name"]}')
+                    poly_features = PolynomialFeatures(degree=2, include_bias=False)
+                else:
+                    print("Not using poly")
+                
+            evaluator = ModelEvaluator(
+                        X=X,
+                        y=y,
+                        model=cfg["model"],
+                        model_name=cfg["name"],
+                        plot_dir=plot_dir,
+                        antibody=antibody,
+                        embedding=embedding,
+                        param_grid=cfg["param_grid"],
+                        mutations=mutations,
+                        poly=poly_features
+                    )
+            # Set model-specific configs
+            metrics = evaluator.evaluate()
+            metrics_df = pd.concat([metrics_df, pd.DataFrame([metrics])], ignore_index=True)
 
 # Save all metrics to a single CSV
-metrics_csv_path = os.path.join(plot_dir, "consolidated_metrics.csv")
+metrics_csv_path = os.path.join(plot_dir, "cv_metrics.csv")
 metrics_df.to_csv(metrics_csv_path, index=False)
 print(f"All metrics saved to {metrics_csv_path}")
 
