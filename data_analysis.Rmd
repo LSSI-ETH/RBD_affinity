@@ -1,16 +1,31 @@
 ---
-title: "Data analysis"
+title: "EPFL_3mut_combi"
 author: "hjm"
-date: "2025-03-03"
+date: "2024-04-24"
 output: html_document
 ---
 
-# This file gives step by step data analysis and figure generation code for study "High throughput analysis of SARS CoV-2 receptor binding domain variants"
+This file is for exploring the relative affinity data on all n=3 combinations of Omicron BA.1 mutations. WT and Omicron were also tested as a reference.
+
+From Sai: 
+1. Which residues are the most important in terms of leading to affinity losses
+2. whether there are higher order (synergistic) interactions amongst residues, 
+3. whether there is a difference between the antibodies in terms of being more or less susceptible to binding, and 
+4. if possible to maybe learn what the possible evolutionary trajectories might be (although that is probably not possible?).
+5. We may want to also think about how to use this data for an ML regression model to predict affinity?
+
+Let's break it into parts.
+
+```{r}
+#read data
+df_bam<-read.delim(file = "mutations_bamlanivimab.txt",sep = ",")
+df_DBR3<-read.delim(file = "mutations_DBR3.txt",sep = ",")
+df_imd<-read.delim(file = "mutations_imdevimab.txt",sep = ",")
+#shunxu: 1 3 2
+```
 
 ```{r}
 source("RBD_tree_functions.R")
-source("utils.R")
-
 library(ggplot2)
 library(dplyr)
 library(tidyr)
@@ -25,19 +40,11 @@ library(qgraph)
 ```
 
 ```{r}
-#read data
-
-df_bam<-read.delim(file = "mutations_bamlanivimab.txt",sep = ",")
-df_DBR3<-read.delim(file = "mutations_DBR3.txt",sep = ",")
-df_imd<-read.delim(file = "mutations_imdevimab.txt",sep = ",")
-binding_site<-read.csv("EPFLbindingsite.csv")
-```
-
-```{r}
 check_within_CI(df_DBR3)
 check_within_CI(df_bam)
 check_within_CI(df_imd)
 ```
+
 
 ```{r}
 df_DBR3<-normalise_df(df_DBR3)
@@ -45,18 +52,106 @@ df_bam<-normalise_df(df_bam)
 df_imd<-normalise_df(df_imd)
 ```
 
+
+```{r}
+
+normalise_result_compare(df_DBR3)
+normalise_result_compare(df_bam)
+normalise_result_compare(df_imd)
+```
+
+
+
+take the mean of all the replicates
+```{r}
+
+mean_affinity_by_variant<-function(df){
+  
+  df <- df %>%
+  mutate(Mutations = str_replace_all(Mutations, ",", " "))
+    
+  mean_df <- df %>%
+  group_by(Mutations) %>%
+  summarise(Mean_Relative_Affinity = mean(Affinity_wt, na.rm = TRUE))
+  merged_df <- df %>%
+  left_join(mean_df, by = "Mutations")
+  
+
+  return(merged_df)
+}
+
+```
+
 ```{r}
 df1<-mean_affinity_by_variant(df_bam)
 df2<-mean_affinity_by_variant(df_DBR3)
 df3<-mean_affinity_by_variant(df_imd)
+head(df1)
+df1$Antibody<-"Bamlanivimab"
+df2$Antibody<-"DBR3_03"
+df3$Antibody<-"Imdevimab"
+```
+
+Which residues are the most important in terms of leading to affinity losses
+```{r}
+#use WT as reference.
+#try to calculate escape score! it is a single mutation level but accross different antibodies. use the number of escaped antibody as a representation for strength. but the difference here is the data is not binary labeled as binding/non-binding, but it is continuous. what leads to affinity loss? use affinity directly as the score. but still have to normalise by the time it appears.
+#calculate the affinity decrease/increase to WT, by ratio/substract. fold change in realitive affinity. -> Affinity_wt
+# first calculate within mab, then think about across mabs.
+# unlist "Q493R Q498R N501Y" take the same value for every mutation in the combination
+single_mutation_score <- function(df) {
+    # Separate mutations into individual rows
+    df_expanded <- df %>%
+        mutate(Mutations = str_split(Mutations, "[, ]+")) %>%
+        unnest(Mutations)
+
+    # Calculate mean and standard deviation of fold change for each mutation
+    mutation_scores <- df_expanded %>%
+        group_by(Mutations) %>%
+        summarise(
+            Mean_Affinity_WT = mean(Mean_Relative_Affinity, na.rm = TRUE),
+            SD_Affinity_WT = sd(Mean_Relative_Affinity, na.rm = TRUE),
+            .groups = 'drop'  # Drop the grouping structure afterwards
+        )
+    mutation_scores <- mutation_scores %>%
+        arrange(desc(Mean_Affinity_WT)) %>%
+        mutate(Rank = row_number())
+
+    mutation_scores$Mutations[mutation_scores$Mutations == '']<-"WT"
+
+    return(mutation_scores)
+}
+
 ```
 
 ```{r}
 mut_score1 <- single_mutation_score(df1)
 mut_score2 <- single_mutation_score(df2)
 mut_score3 <- single_mutation_score(df3)
+head(mut_score1)
 ```
 
+```{r}
+
+plot_affinity_change <- function(score_df) {
+    score_df <- score_df %>%
+    mutate(Mutations = gsub("E584A", "E484A", Mutations))
+  
+  plot <- ggplot(score_df, aes(x = reorder(Mutations, Mean_Affinity_WT), y = Mean_Affinity_WT)) +
+    geom_bar(stat = "identity", fill = "#00518d") +  # Set bar color to #00518d
+    labs(title = "Ranking of Mutations by Mean Affinity Change", x = "Mutations", y = "Mean Affinity Change") +
+    ylim(0, 1.2) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1.1, vjust = 1.5, size = 15),
+      axis.text.y = element_text(size = 10),
+      panel.grid = element_blank()
+    ) +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "red")  # Keep red dashed reference line
+  return(plot)
+}
+
+```
 
 ```{r}
 p1<-plot_affinity_change(mut_score1)
@@ -67,24 +162,147 @@ p<-grid.arrange(p3, p1, p2, ncol = 1)
 
 ggsave("single_mutation_barplot.pdf", p,width = 15, height = 20)
 ```
+how I have calculated the affinity reduction mean of single mutation. now I want to extract the same info for 2-mer mutations. this how I want to do it: for each row when there is 3 mutations in the "Mutation" column, extract every possible combination of 2 mutation and let them have r
+```{r}
+#try 2-mer combinations. and compare with the mean of each!
+two_mutation_score<-function(df){
+    mut_score <- single_mutation_score(df)
+    
+    df_two_mut <- df %>%
+    filter(Mutations != "" & !is.na(Mutations)) %>% #!!!!!
+    filter(nchar(Mutations) <18) %>%
+    mutate(
+    Two_Mutations = lapply(str_split(Mutations, " "), combn, 2, simplify = FALSE)) %>%
+    unnest(Two_Mutations) %>%
+    mutate(Two_Mutations = sapply(Two_Mutations, function(x) paste(sort(x), collapse = " "))) %>%
+    group_by(Two_Mutations) %>%
+    summarise(Mean_Affinity_WT_2mut = mean(Affinity_wt, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(pair_id = row_number())
+
+ 
+ df_individual_scores <- df_two_mut %>%
+    separate_rows(Two_Mutations, sep = " ") %>%
+       #mutate(pair_id = (row_number() - 1) %/% 3 + 1) %>%
+    left_join(mut_score, by = c("Two_Mutations" = "Mutations")) %>%
+    group_by(pair_id) %>%
+    summarise(
+    Combi2 = paste(Two_Mutations, collapse=" "),
+    Individual_Score = list(Mean_Affinity_WT),
+    Mean_Affinity_WT_2mut = first(Mean_Affinity_WT_2mut),
+    .groups = 'drop'
+  )%>%
+  unnest_wider(Individual_Score, names_sep = "_")
+
+  df_individual_scores <- df_individual_scores %>%
+    mutate(fold_change = Mean_Affinity_WT_2mut/pmin(Individual_Score_1 , Individual_Score_2))
+   
+ return(df_individual_scores)
+}
+
+```
+
+```{r}
+
+
+plot_synergestic2 <- function(df_individual_scores) {
+  # Fix mutation name issue
+  df_individual_scores$Combi2 <- df_individual_scores$Combi2 %>%
+    str_replace_all("E584A", "E484A")
+  
+  # Filter data to keep only mutation pairs with fold_change ≤ 1
+  df_filtered <- df_individual_scores %>% filter(fold_change <= 1)
+  
+  # Reorder factor levels based on fold_change
+  df_filtered$Combi2 <- factor(df_filtered$Combi2, 
+                               levels = df_filtered$Combi2[order(df_filtered$fold_change)])
+  
+  # Generate the plot
+  ggplot(df_filtered, aes(x = Combi2)) +
+    geom_boxplot(aes(ymin = Individual_Score_1, lower = Individual_Score_1, middle = Individual_Score_1, 
+                     upper = Individual_Score_2, ymax = Individual_Score_2), 
+                 stat = "identity", fill = "#a2c0f0", color=NA) +
+    geom_point(aes(y = Mean_Affinity_WT_2mut), color = "darkred", size = 4) +
+    labs(title = "Mutation Impact on Affinity (Fold Change <= 1)",
+         x = "Mutation Combination",
+         y = "Mean Affinity WT Score") +
+    scale_y_continuous(limits = c(0, 1.25), breaks = seq(0, 1.25, 0.25))+
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+      panel.grid.major = element_blank(),  # Removes major grid lines
+      panel.grid.minor = element_blank(),  # Removes minor grid lines
+      panel.border = element_blank(),  # Removes the frame
+      panel.background = element_blank()  # Removes background
+    ) +
+    geom_hline(yintercept = 1, linetype = "dashed", color = "#d63226", size = 1)  
+}
+
+
+plot_synergestic2(mut2_score1)
+```
 
 ```{r}
 mut2_score1<-two_mutation_score(df1)
 mut2_score2<-two_mutation_score(df2)
 mut2_score3<-two_mutation_score(df3)
+
 mut2_score1$antibody <- "Bamlanivimab"
-mut2_score2$antibody <- "DBR3"
+mut2_score2$antibody <- "DBR3_03"
 mut2_score3$antibody <- "Imdevimab"
+head(mut2_score1)
+
 ```
 
 ```{r}
+
 p1<-plot_synergestic2(mut2_score1)
 p2<-plot_synergestic2(mut2_score2)
 p3<-plot_synergestic2(mut2_score3)
 
+
 p<-grid.arrange(p3, p1, p2, ncol = 1)
  
 ggsave("synergistic2_Ime_bam_DBR3.pdf", p,width = 15, height = 20)
+```
+
+```{r}
+three_mutation_score<-function(df){
+  mut_score<-single_mutation_score(df)
+
+  df_individual_scores <- df %>%
+    filter(Mutations != "" & !is.na(Mutations)) %>%
+    filter(nchar(Mutations) <18) %>%
+    # Split the three mutations and expand into rows
+    mutate(Single_Mutations = str_split(Mutations, " ")) %>%
+    unnest(Single_Mutations) %>%
+    # Join individual mutation scores
+    left_join(mut_score, by = c("Single_Mutations"="Mutations")) %>%
+    # Re-group to summarize the individual scores
+    group_by(Mutations) %>%
+    summarise(
+      Individual_Score = list(Mean_Affinity_WT),
+      Mean_Affinity_WT_3mut = first(Affinity_wt),
+      .groups = 'drop'
+    ) 
+
+  df_individual_scores$Individual_Score_1<- NA
+  df_individual_scores$Individual_Score_2<-NA
+  df_individual_scores$Individual_Score_3<- NA
+ 
+  for(i in 1:nrow(df_individual_scores)){
+   df_individual_scores$Individual_Score_1[i]<- df_individual_scores$Individual_Score[[i]][1]
+    df_individual_scores$Individual_Score_2[i]<-df_individual_scores$Individual_Score[[i]][2]
+   df_individual_scores$Individual_Score_3[i]<- df_individual_scores$Individual_Score[[i]][3]
+  }
+
+
+  df_individual_scores <- df_individual_scores %>%
+    mutate(fold_change = Mean_Affinity_WT_3mut/pmin(Individual_Score_1 , Individual_Score_2 , Individual_Score_3)) %>%
+    arrange(fold_change) %>%
+    mutate(Rank = row_number())
+
+return(df_individual_scores)
+}
 ```
 
 ```{r}
@@ -94,43 +312,122 @@ mut3_score3<-three_mutation_score(df3)
 ```
 
 ```{r}
+plot_synergestic3 <- function(df_individual_scores) {
+  antibody<-df_individual_scores$Antibody[1]
+  
+  df_individual_scores$Mutations <- df_individual_scores$Mutations %>%
+    str_replace_all("E584A", "E484A")
+  df_individual_scores$Mutations <- factor(df_individual_scores$Mutations, levels = df_individual_scores$Mutations[order(df_individual_scores$fold_change,decreasing = T)])
+
+  df_long <- df_individual_scores %>%
+    pivot_longer(
+      cols = c(Individual_Score_1, Individual_Score_2, Individual_Score_3),
+      names_to = "Score_Type",
+      values_to = "Score_Value"
+    )
+  
+  ggplot(df_long, aes(y = Mutations, x = Score_Value, color = Score_Type)) +
+    geom_text(aes(label = "|"), hjust = 0.5, vjust = 0.5, fontface = "bold", size = 3) +
+    geom_point(aes(x = Mean_Affinity_WT_3mut), color = "darkred", size = 1, position = position_dodge(width = 0.5)) +  # Red dot for combined score
+    labs(title = "Individual Scores for Each Mutation Combination",
+         y = "Mutation Combination",
+         x = antibody) +
+    xlim(0, 3) +
+    theme(
+      axis.text.y = element_text(angle = 0, vjust = 0.5, hjust = 1),
+      panel.grid.major = element_blank(),  # Removes major grid lines
+      panel.grid.minor = element_blank(),  
+      panel.background = element_rect(fill = "white", colour = "black") ,# Removes minor grid lines
+      legend.position = "none" 
+    ) +
+    scale_color_brewer(palette = "Set1", name = "Score Type") +
+    scale_shape_manual(values = c(16, 17, 18))
+}
+
+```
+
+
+```{r}
 p1<-plot_synergestic3(mut3_score1) #Bam
 p2<-plot_synergestic3(mut3_score2) #DBR3
 p3<-plot_synergestic3(mut3_score3) #Imd
 
 p<-grid.arrange(p1, p3, p2, ncol = 3)
-ggsave("synergistic3_ranked.pdf", p,width = 20, height = 50,limitsize = FALSE)
+ggsave("synergistic3_ranked.pdf", p,width = 20, height = 55,limitsize = FALSE)
+```
+
+present the top10 2mer combination and 3 mer combination based on affinity decrease comparing to the mean of individual.
+```{r}
+plot_fold_change<-function(mut3_score, n= 50){
+  top_scores <- mut3_score %>%
+  arrange(fold_change) %>%
+  slice_head(n=n)
+
+p<-plot_synergestic3(top_scores)
+return(p)
+}
+p1<-plot_fold_change(mut3_score1)
+p2<-plot_fold_change(mut3_score2)
+p3<-plot_fold_change(mut3_score3)
+p<-grid.arrange(p1, p2, p3, ncol = 1)
+ggsave("top50mut3foldchange.pdf", p, width = 16, height = 18)
 ```
 
 ```{r}
-# Do Tukey test to see difference on combination of mutation binding affinity decrease comparing to the individual mutation
+plot_fold_change2<-function(mut2_score, n= 50){
+  top_scores <- mut2_score %>%
+  arrange(fold_change) %>%
+  slice_head(n=50)
 
+p<-plot_synergestic2(top_scores)
+return(p)
+}
+
+p1<-plot_fold_change2(mut2_score1)
+p2<-plot_fold_change2(mut2_score2)
+p3<-plot_fold_change2(mut2_score3)
+p1
+p<-grid.arrange(p1, p2, p3, ncol = 1)
+ggsave("top50mut2foldchange_ranked.pdf", p, width = 16, height = 16)
+```
+
+```{r}
+#I think should calculate the 2-mer frequency after taking the top n of 3 mer affinity-decreasing combinations!
+
+top_scores <- mut3_score1 %>%
+arrange(fold_change) %>%
+slice_head(n=50)
+
+
+# Expanding three-mutation combinations into all possible two-mutation combinations
+top_scores <- top_scores %>%
+  mutate(Two_Mutation_Combos = map(str_split(Mutations, " "), ~ combn(.x, 2, simplify = FALSE))) %>%
+  unnest(Two_Mutation_Combos) %>%
+  mutate(Two_Mutation_Combos = map_chr(Two_Mutation_Combos, ~ paste(sort(.x), collapse = " ")))
+
+# Checking how often each combination appears
+two_mutation_counts <- top_scores %>%
+  count(Two_Mutation_Combos, sort = TRUE)  # sort = TRUE will arrange it from most to least common
+
+
+head(two_mutation_counts)
+```
+
+```{r}
+#which ab is more susceptible to mutations?
+#plot a violin plot for fold change distribution
+
+# Add a column to each dataframe indicating the antibody name
 mut3_score1 <- mut3_score1 %>% mutate(Antibody = "Bamlanivimab")
-mut3_score2 <- mut3_score2 %>% mutate(Antibody = "DBR3_03")
+mut3_score2 <- mut3_score2 %>% mutate(Antibody = "DBR3")
 mut3_score3 <- mut3_score3 %>% mutate(Antibody = "Imdevimab")
-
-combined_data <- bind_rows(mut3_score1, mut3_score2, mut3_score3)
-
-long_data <- combined_data %>% 
-   filter(Mean_Affinity_WT_3mut < 1) %>% 
-  select(Mutations, Mean_Affinity_WT_3mut, Antibody)
-
-anova_result <- aov(Mean_Affinity_WT_3mut ~ Antibody, data = long_data)
-
-summary(anova_result)
-tukey_result <- TukeyHSD(anova_result)
-
-# Print Tukey's test results
-print(tukey_result)
-
-
-```
-
-```{r}
-#Violin plot to compare fold changes in three antibodies
+# Remove the row with the highest fold_change in Bamlanivimab (mut3_score1)
 mut3_score1 <- mut3_score1 %>% filter(fold_change != max(fold_change, na.rm = TRUE))
+
+# Combine all dataframes into one
 combined_data <- bind_rows(mut3_score3, mut3_score1, mut3_score2) %>%
   filter(fold_change < 1) 
+# Create the violin plot
 
 g <- ggplot(combined_data, aes(x = Antibody, y = fold_change, fill = Antibody)) +
   geom_violin(trim = FALSE, scale = "width", color = "black") +  # Violin plots with black borders
@@ -159,55 +456,616 @@ g <- ggplot(combined_data, aes(x = Antibody, y = fold_change, fill = Antibody)) 
     geom_segment(aes(x = 1, xend = 3, y = 1.3, yend = 1.3), color = "black") +  # Imdevimab vs. DBR3_03
     geom_text(aes(x = 2, y = 1.35, label = "***"), size = 5)  # Add *** for p < 0.0001
 
+
+
+g
 ggsave("violin_foldchange.pdf", g, width = 8, height = 4)
 ```
 
 ```{r}
-g1<-plot_network(mut2_score1,binding_site)
-g2<-plot_network(mut2_score2,binding_site)
-g3<-plot_network(mut2_score3,binding_site)
+# Create the box plot
+ggplot(combined_data, aes(x = Antibody, y = fold_change, fill = Antibody)) +
+  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 2, color = "black") +
+  labs(title = "Fold Change Distribution by Antibody (Box Plot)",
+       x = "Antibody",
+       y = "Fold Change") +
+  theme_minimal() +
+  scale_x_discrete(limits = c("Bamlanivimab", "Imdevimab", "DBR3")) +  # Ensure the desired x-axis order
+  theme(
+    legend.position = "none",  # Remove legend
+    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels if needed
+  )
+```
+
+```{r}
+# think about comparison accross mabs.
+# some mabs more suseptible? how to make this conclusion?
+# evaluate on 3-mer basis
+# if we are looking at the fold change then there is no need to normalise across the mabs.
+#
+
+# Merge the dataframes by 'Mutation'
+combined_mut3_score <- merge(merge(mut3_score1, mut3_score2, by = "Mutations", all = TRUE), mut3_score3, by = "Mutations", all = TRUE)
+
+# Reorder columns and rename fold_change columns
+combined_mut3_score <- combined_mut3_score[, c("Mutations", "fold_change.x", "fold_change.y", "fold_change")]
+colnames(combined_mut3_score) <- c("Mutation", "fold_change_bamlanivimab", "fold_change_DBR3", "fold_change_imdevimab")
 
 
-pdf("igrpah3_new.pdf", width = 13, height = 5)
-par(mfrow = c(1, 3))
-plot_qgraph(g1)
-plot_qgraph(g3)
-plot_qgraph(g2)
+long_data<- combined_mut3_score %>%
+  select(Mutations, fold_change.x, fold_change.y, fold_change,
+         antibody.x, antibody.y, antibody) %>%
+  rename(fold_change.z = fold_change,
+         antibody.z = antibody) %>%
+  filter(fold_change < 1) %>%
+  pivot_longer(
+    cols = -Mutations,  # Exclude Mutations from the pivot
+    names_to = c(".value", "set"),  # Split the column names based on pattern
+    names_pattern = "(.*)\\.(.)"  # Use regex to separate the fold_change and antibody names
+  ) %>%
+  select(Mutations, fold_change, antibody)
+  
 
-legend("topright",               
-       legend = names(category_colors), 
-       col = category_colors,    
-       pch = 16,                  
-       pt.cex = 1.5,             
-       cex = 1.5,                 
-       bty = "n") 
-dev.off()
+anova_result <- aov(fold_change ~ antibody, data = long_data)
+summary(anova_result)
 ```
 
 ```{r}
 
- mut_score1$Antibody <- "Bamlanivimab"
- mut_score2$Antibody <- "DBR3_03"
- mut_score3$Antibody <- "Imdevimab"
+# Add a column to each dataframe indicating the antibody name
+mut3_score1 <- mut3_score1 %>% mutate(Antibody = "Bamlanivimab")
+mut3_score2 <- mut3_score2 %>% mutate(Antibody = "DBR3_03")
+mut3_score3 <- mut3_score3 %>% mutate(Antibody = "Imdevimab")
 
-merged_mut_df <- bind_rows(mut_score1, mut_score2, mut_score3) %>%
-  select(Antibody, Mutations, Mean_Affinity_WT) %>%
-  pivot_wider(names_from = Antibody, values_from = Mean_Affinity_WT)
+# Combine the dataframes into one
+combined_data <- bind_rows(mut3_score1, mut3_score2, mut3_score3)
 
-heatmap_matrix <- as.matrix(merged_mut_df[,-1])  
-rownames(heatmap_matrix) <- merged_mut_df$Mutations
+# Reshape the data (optional since the combined_data is already tidy)
+# This ensures the columns are Mutation, fold_change, and Antibody
+long_data <- combined_data %>% 
+   filter(Mean_Affinity_WT_3mut < 1) %>% 
+  select(Mutations, Mean_Affinity_WT_3mut, Antibody)
+
+# Perform ANOVA
+anova_result <- aov(Mean_Affinity_WT_3mut ~ Antibody, data = long_data)
+
+# Print ANOVA summary
+summary(anova_result)
+
+# Perform Tukey's HSD test
+tukey_result <- TukeyHSD(anova_result)
+
+# Print Tukey's test results
+print(tukey_result)
+
+# Optional: Plot Tukey HSD results
+plot(tukey_result)
+
+```
+
+```{r}
+#this test didn't assume normalisation. But gives similar results.
+kruskal_result <- kruskal.test(fold_change ~ antibody, data = long_data)
+print(kruskal_result)
+```
+```{r}
+TukeyHSD(anova_result)
+```
+
+```{r}
+
+library(multcomp)
+pairwise.wilcox.test(long_data$fold_change, long_data$antibody, p.adjust.method = "BH")
+
+```
+
+```{r}
+#ok did analysis on 3 mutation behavior of the 3 mabs and we found similarity between ly555 and regn33, the 
+mut3_score1$antibody <- "bamlanivimab"
+mut3_score2$antibody <- "DBR3"
+mut3_score3$antibody <- "imdevimab"
+
+# Merge the dataframes by 'Mutation'
+combined_mut3_score <- merge(merge(mut3_score1, mut3_score2, by = "Mutations", all = TRUE), mut3_score3, by = "Mutations", all = TRUE)
+
+# Reorder columns and rename fold_change columns
+combined_mut3_score <- combined_mut3_score[, c("Mutations", "fold_change.x", "fold_change.y", "fold_change")]
+colnames(combined_mut3_score) <- c("Mutation", "fold_change_bamlanivimab", "fold_change_DBR3", "fold_change_imdevimab")
+
+
+long_data<- combined_mut3_score %>%
+  select(Mutations, fold_change.x, fold_change.y, fold_change,
+         antibody.x, antibody.y, antibody) %>%
+  rename(fold_change.z = fold_change,
+         antibody.z = antibody) %>%
+  pivot_longer(
+    cols = -Mutations,  # Exclude Mutations from the pivot
+    names_to = c(".value", "set"),  # Split the column names based on pattern
+    names_pattern = "(.*)\\.(.)"  # Use regex to separate the fold_change and antibody names
+  ) %>%
+  select(Mutations, fold_change, antibody)
+```
+
+```{r}
+length(apply(combined_mut3_score,1,function(x) any(is.na(x)))) - sum(apply(combined_mut3_score,1,function(x) any(is.na(x))))
+# number of 3-mut combinations present in every mab dataset
+
+```
+```{r}
+binding_site<-read.csv("EPFLbindingsite.csv")
+
+
+correct<-function(mut2_score){
+    mut2_score$Combi2 <- mut2_score$Combi2%>%
+    str_replace_all("E584A", "E484A")
+    return(mut2_score)
+}
+mut2_score1<-correct(mut2_score1)
+correct(mut2_score2)
+correct(mut2_score3)
+
+```
+
+```{r}
+
+plot_network <- function(mut2_score, binding_site) {
+  
+
+  
+  # Extract the antibody name from the input dataframe
+  antibody_name <- unique(mut2_score$antibody)
+  if (length(antibody_name) != 1) {
+    stop("Input dataframe must contain rows for only one antibody.")
+  }
+
+  # Get the binding site positions for the specified antibody
+  binding_positions <- binding_site[[antibody_name]]
+
+  mut2_score <- mut2_score %>%
+    separate(Combi2, into = c("Mutation1", "Mutation2"), sep = " ", remove = FALSE) %>%
+    mutate(Individual_Score_1 = as.numeric(Individual_Score_1),
+           Individual_Score_2 = as.numeric(Individual_Score_2))
+
+  scores_summary <- mut2_score %>%
+    dplyr::select(Mutation1, Mutation2, Individual_Score_1, Individual_Score_2) %>%
+    pivot_longer(cols = c(Mutation1, Mutation2),
+                 names_to = "Mutation_Pos",
+                 values_to = "Mutation") %>%
+    pivot_longer(cols = c(Individual_Score_1, Individual_Score_2),
+                 names_to = "Score_Pos",
+                 values_to = "Score") %>%
+    filter(Mutation_Pos == str_replace(Score_Pos, "Individual_Score_", "Mutation")) %>%
+    group_by(Mutation) %>%
+    summarize(Avg_Score = mean(Score, na.rm = TRUE)) %>%
+    ungroup()
+
+  scores_summary <- scores_summary %>%
+    mutate(Position = as.numeric(str_extract(Mutation, "\\d+"))) %>%
+    mutate(Category = ifelse(Position %in% binding_positions, "Binding Site", "Non-Binding Site"))
+
+  # Create an edge list for igraph
+  edges <- mut2_score %>%
+    dplyr::select(Mutation1, Mutation2, fold_change)
+
+  # Create the graph from the edge list
+  g <- graph_from_data_frame(edges, directed = FALSE)
+
+  edges_to_remove <- E(g)[E(g)$fold_change > 1]
+
+  # Delete these edges from the graph
+  g <- delete_edges(g, edges_to_remove)
+
+  V(g)$size <- scores_summary$Avg_Score[scores_summary$Mutation %in% V(g)$name]
+  V(g)$size <- (2 + (1 / V(g)$size))**2
+
+  # Set edge width inversely proportional to fold_change
+  E(g)$width <- (1 / E(g)$fold_change)**3
+
+  # Assign categories (Binding Site or Non-Binding Site)
+  V(g)$Category <- scores_summary$Category[match(V(g)$name, scores_summary$Mutation)]
+
+  # Define colors for categories
+  category_colors <- c("Binding Site" = "darkred", "Non-Binding Site" = "black")
+
+  V(g)$color <- category_colors[V(g)$Category]
+  V(g)$label.dist <- (V(g)$size * 0.2)^0.7
+  V(g)$frame.color <- NA 
+  
+  E(g)$color <- "darkgrey"
+  
+
+
+  return(g)
+}
+category_colors <- c("Binding Site" = "darkred", "Non-Binding Site" = "black")
+
+plot_qgraph<-function(g){
+  e <- as_edgelist(g,names=FALSE)
+  l <- qgraph.layout.fruchtermanreingold(e,vcount=vcount(g))
+  plot(g,layout=l)
+}
+
+g1<-plot_network(mut2_score1,binding_site)
+g2<-plot_network(mut2_score2,binding_site)
+g3<-plot_network(mut2_score3,binding_site)
+
+par(mfrow = c(1, 3))
+
+plot_qgraph(g3) #im
+plot_qgraph(g1) #bam
+plot_qgraph(g2) #DBR3
+
+
+```
+
+
+
+```{r}
+pdf("igrpah3_new.pdf", width = 13, height = 5)
+par(mfrow = c(1, 3))
+plot_qgraph(g1) #bam
+plot_qgraph(g3) #im
+plot_qgraph(g2) #Dbr3
+
+legend("topright",               # Position of the legend
+       legend = names(category_colors),  # Labels for the legend
+       col = category_colors,     # Colors used in the legend
+       pch = 16,                  # Type of point to use, 16 is a filled circle
+       pt.cex = 1.5,              # Point size
+       cex = 1.5,                 # Font size of text
+       bty = "n") 
+dev.off()
+```
+```{r}
+color_palette <- colorRampPalette(c("beige", "red"))
+normalized_widths <- (E(g)$width - min(E(g)$width)) / (max(E(g)$width) - min(E(g)$width))
+# Apply color palette
+E(g)$color <- color_palette(length(E(g)$width))[order(-normalized_widths)]
+plot(g)
+```
+
+```{r}
+plot(g)
+legend("topright",               # Position of the legend
+       legend = names(category_colors),  # Labels for the legend
+       col = category_colors,     # Colors used in the legend
+       pch = 16,                  # Type of point to use, 16 is a filled circle
+       pt.cex = 1.5,              # Point size
+       cex = 0.8,                 # Font size of text
+       bty = "n") 
+```
+
+```{r}
+# plot heatmap for overview of data to replace fig2A.
+# align variants, 3 columns tobe 3 binders,
+# color  being normalised values.
+# Merge all three data frames
+merged_df123 <- bind_rows(df1, df2, df3) %>%
+  group_by(Antibody, Variant) %>%
+  summarise(Mean_Relative_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # Take the mean
+  pivot_wider(names_from = Antibody, values_from = Mean_Relative_Affinity)  # Convert to wide format
+
+# Replace NAs with 0 or another suitable value (if needed)
+merged_df[is.na(merged_df)] <- 0
+
+# Convert to matrix for pheatmap (remove Variant column)
+heatmap_matrix <- as.matrix(merged_df[,-1])  
+rownames(heatmap_matrix) <- merged_df$Variant
+
+# Define custom color gradient (red → beige → blue)
+my_colors <- colorRampPalette(c("red", "beige", "blue"))(100)
+
+# Generate the heatmap
+pheatmap(heatmap_matrix,
+         color = my_colors,
+         cluster_rows = TRUE,  # Cluster similar variants
+         cluster_cols = TRUE,  # Cluster antibodies
+         scale = "none",       # Don't normalize data
+         main = "Mean Relative Affinity Across Variants",
+         fontsize = 10)  # Adjust font size if needed
+
+```
+
+```{r}
+duplicates <- bind_rows(df1, df2, df3) %>%
+  group_by(Antibody, Variant) %>%
+  filter(n() > 1) %>%  # Keep only duplicates
+  arrange(Antibody, Variant)
+
+# Display duplicates
+print(duplicates)
+```
+```{r}
+normalize_variant <- function(variant) {
+  if (variant %in% c("o", "o_1", "o_2")) {
+    return("o")
+  } else {
+    return(variant)
+  }
+}
+library(pheatmap)
+merged_df123 <- bind_rows(df1, df2, df3) %>%
+  mutate(Variant = sapply(Variant, normalize_variant)) %>%  # Standardize variant names
+  group_by(Antibody, Variant) %>%
+  summarise(Mean_Relative_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # Take mean for duplicates
+  pivot_wider(names_from = Antibody, values_from = Mean_Relative_Affinity) 
+
+#merged_df123[is.null(merged_df123)] <-NA
+merged_df123[is.na(merged_df123)] <- -999
+# Convert to matrix for pheatmap (remove Variant column)
+heatmap_matrix <- as.matrix(merged_df123[,-1])  
+rownames(heatmap_matrix) <- merged_df123$Variant
+
+# Define custom color gradient (red → beige → blue)
+
+heatmap_min <- min(heatmap_matrix[heatmap_matrix != -999])  # Smallest valid value
+heatmap_max <- max(heatmap_matrix[heatmap_matrix != -999])  # Largest valid value
+
+# **Fix: Define proper breaks only for valid values**
+breaks_list <- seq(heatmap_min, heatmap_max, length.out = 101) 
+breaks_list <- c(-1000, breaks_list)
+
+my_colors <- colorRampPalette(c("darkred", "beige", "#00518d"))(100)
+final_colors <- c("gray", my_colors)
 
 desired_order <- c("Imdevimab", "Bamlanivimab", "DBR3_03")
 heatmap_matrix <- heatmap_matrix[, desired_order]
 
+# Save as PDF
+pdf("pheatmap_affinity.pdf", width = 6, height = 12)  # Adjust size as needed
+
+# Generate the heatmap
+pheatmap(heatmap_matrix,
+         color = final_colors,        # Use correct color mapping
+         breaks = breaks_list,        # Ensure color scale remains 0-3, with gray for missing values
+         cluster_rows = TRUE,         # Enable clustering for variants
+         cluster_cols = FALSE,        # Keep antibody order fixed
+         scale = "none",
+         main = "Mean Relative Affinity Across Variants",
+         fontsize = 10,
+         legend = TRUE,               # Show normal legend (0 to 3, red to blue)
+         show_rownames = FALSE,       # Remove row names
+         angle_col = 0)                 # Make antibody names horizontal
+
+dev.off() 
+
+```
+
+```{r}
+# Merge data and standardize variant names
+merged_df123 <- bind_rows(df1, df2, df3) %>%
+  mutate(Variant = sapply(Variant, normalize_variant)) %>%  # Standardize variant names
+  group_by(Antibody, Variant) %>%
+  summarise(Mean_Relative_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # Take mean for duplicates
+  pivot_wider(names_from = Antibody, values_from = Mean_Relative_Affinity) 
+
+# Replace NA with -999 to mark missing values
+merged_df123[is.na(merged_df123)] <- -999
+
+# Convert to matrix for pheatmap (remove Variant column)
+heatmap_matrix <- as.matrix(merged_df123[,-1])  
+rownames(heatmap_matrix) <- merged_df123$Variant
+
+# Ensure antibody order is: Imdevimab → Bamlanivimab → DBR3_03
+desired_order <- c("Imdevimab", "Bamlanivimab", "DBR3_03")
+heatmap_matrix <- heatmap_matrix[, desired_order]
+
+# **Fix: Get min/max values ignoring -999**
+heatmap_min <- min(heatmap_matrix[heatmap_matrix != -999])  # Smallest valid value
+heatmap_max <- max(heatmap_matrix[heatmap_matrix != -999])  # Largest valid value
+
+# **Fix: Define proper breaks only for valid values**
+breaks_list <- seq(0, 2, length.out = 51)  # Scale from min to max
+breaks_list <- c(-1000, breaks_list)  # Add -999 as a separate break
+
+# **Fix: Ensure gray is only used for -999, not affecting other values**
+my_colors <- colorRampPalette(c("darkred", "beige", "#00518d"))(50)  # Only for real values
+final_colors <- c("gray", my_colors)  # Add gray as the first color
+
+# Save as PDF
+pdf("pheatmap_affinity.pdf", width = 6, height = 12)  # Adjust size as needed
+
+# Generate the heatmap
+pheatmap(heatmap_matrix,
+         color = final_colors,
+         breaks = breaks_list,        # Ensure color scale remains correct
+         cluster_rows = TRUE,         # Enable clustering for variants
+         cluster_cols = FALSE,        # Keep antibody order fixed
+         scale = "none",
+         main = "Mean Relative Affinity Across Variants",
+         fontsize = 10,
+         legend = TRUE,               # Show normal legend (0 to 3, red to blue)
+         show_rownames = FALSE,       # Remove row names
+         angle_col = 0,
+         border_color = NA)               # Make antibody names horizontal
+
+dev.off()  # Close the PDF device
+
+
+
+```
+```{r}
+breaks_list <- seq(0, 2, length.out = 51) 
+my_colors <- colorRampPalette(c("darkred", "beige", "#00518d"))(50) # Scale from min to max
+# Save as PDF
+pdf("pheatmap_legend.pdf", width = 6, height = 12)  # Adjust size as needed
+
+# Generate the heatmap
+pheatmap(heatmap_matrix,
+         color = final_colors,
+         breaks = breaks_list,        # Ensure color scale remains correct
+         cluster_rows = TRUE,         # Enable clustering for variants
+         cluster_cols = FALSE,        # Keep antibody order fixed
+         scale = "none",
+         main = "Mean Relative Affinity Across Variants",
+         fontsize = 10,
+         legend = TRUE,               # Show normal legend (0 to 3, red to blue)
+         show_rownames = FALSE,       # Remove row names
+         angle_col = 0,
+         border_color = NA)               # Make antibody names horizontal
+
+dev.off()
+```
+```{r figure2.1 option A}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)  # for arranging g1 / g2 / g3 on one page
+
+# 0) Build the global original order: df1 -> df2 -> df3 (after normalization)
+variant_order <- bind_rows(
+  df1 %>% mutate(Variant = sapply(Variant, normalize_variant)),
+  df2 %>% mutate(Variant = sapply(Variant, normalize_variant)),
+  df3 %>% mutate(Variant = sapply(Variant, normalize_variant))
+) %>%
+  mutate(.row = row_number()) %>%
+  arrange(.row) %>%
+  distinct(Variant, .keep_all = TRUE) %>%
+  pull(Variant)
+
+# Helper to make one barplot from a single df without merging
+make_plot <- function(dfi, default_title) {
+  # Try to use the Antibody name as title (if the column exists & is a single value)
+  title_txt <- default_title
+  if ("Antibody" %in% names(dfi)) {
+    ab <- unique(dfi$Antibody)
+    if (length(ab) == 1 && !is.na(ab)) title_txt <- paste0(ab, " (Centered at WT=0)")
+  }
+
+  d_plot <- dfi %>%
+    mutate(Variant = sapply(Variant, normalize_variant)) %>%     # normalize
+    group_by(Variant) %>%
+    summarise(Mean_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # mean of duplicates
+    mutate(
+      Variant = factor(Variant, levels = variant_order),         # original global order
+      Mean_Affinity = Mean_Affinity - 1                          # center at WT=1
+    )
+
+  ggplot(d_plot, aes(x = Variant, y = Mean_Affinity, fill = "#00518d")) +
+    geom_bar(stat = "identity", width = 0.7) +
+    theme_minimal() +
+    scale_fill_identity() +
+    scale_y_continuous(limits = c(-2, 2)) +
+    labs(
+      title = title_txt,
+      x = "Variant",
+      y = "Mean Relative Affinity (delta from WT)"
+    ) +
+    theme(
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),
+      axis.text.y = element_text(size = 10),
+      strip.text = element_text(size = 12, face = "bold"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      legend.position = "none"
+    )
+}
+
+# 1) Make the three plots (titles fall back to df1/df2/df3 if no single Antibody value)
+g1 <- make_plot(df1, "df1 (Centered at WT=1)")
+g2 <- make_plot(df2, "df2 (Centered at WT=1)")
+g3 <- make_plot(df3, "df3 (Centered at WT=1)")
+
+# 2) Put 3 barplots together on one page and save
+combined <- g1 / g2 / g3  # stacked vertically; use (g1 | g2 | g3) for horizontal
+ggsave("overview_barplots_original_order_singlepage.pdf", combined, width = 12, height = 12)
+
+
+```
+
+```{r Figure2.1 3 targets in consistent order}
+merged_df123 <- bind_rows(df1, df2, df3) %>%
+  mutate(Variant = sapply(Variant, normalize_variant)) %>%  # Standardize variant names
+  group_by(Antibody, Variant) %>%
+  summarise(Mean_Relative_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # Take mean for duplicates
+  pivot_wider(names_from = Antibody, values_from = Mean_Relative_Affinity) 
+
+# Prepare data: Replace NA with 0 (but don't delete them)
+df_barplot <- merged_df123 %>% mutate(across(-Variant, ~replace_na(., 1)))
+
+# Convert to matrix for clustering (remove Variant column)
+affinity_matrix <- as.matrix(df_barplot[,-1])  
+rownames(affinity_matrix) <- df_barplot$Variant
+
+# Perform hierarchical clustering **only on non-NA variants**
+dist_matrix <- dist(affinity_matrix)  # Compute distance matrix
+clustering <- hclust(dist_matrix)  # Hierarchical clustering
+ordered_variants <- clustering$labels[clustering$order]  # Ordered variant names
+
+# Identify variants with NA values (originally)
+variants_with_na <- merged_df123 %>%
+  filter(if_any(-Variant, is.na)) %>%
+  pull(Variant)
+
+# Place NA-containing variants **at the end of the x-axis order**
+final_variant_order <- c(setdiff(ordered_variants, variants_with_na), variants_with_na)
+
+# Add ordered factor levels to dataframe
+df_barplot <- df_barplot %>%
+  mutate(Variant = factor(Variant, levels = final_variant_order))  # Apply custom order
+
+# Convert dataframe to long format for ggplot
+df_long <- df_barplot %>%
+  pivot_longer(cols = -Variant, names_to = "Antibody", values_to = "Mean_Affinity") %>%
+  mutate(Mean_Affinity = Mean_Affinity - 1)  # Rescale values from 0-3 → -1.5 to 1.5
+
+# Generate the barplot
+g<-ggplot(df_long, aes(x = Variant, y = Mean_Affinity, fill = "#00518d")) +
+  geom_bar(stat = "identity", width = 0.7) +  # Standard bar width
+  facet_wrap(~Antibody, ncol = 1, scales = "free_y") +  # Align across antibodies
+  theme_minimal() +  # Clean theme
+  scale_fill_identity() +  # Apply exact color (#00518d)
+  scale_y_continuous(limits = c(-2, 2 )) +  # Fix y-axis scale from -1.5 to 1.5
+  labs(title = "Mean Relative Affinity of Variants (Clustered, NA on Right, Rescaled)",
+       x = "Variant",
+       y = "Mean Relative Affinity") +
+  theme(
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),  # Rotate variant labels
+    axis.text.y = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold"),  # Facet labels
+    panel.grid.major = element_blank(),  # Remove major grid
+    panel.grid.minor = element_blank(),  # Remove minor grid
+    legend.position = "none"  # Remove legend (since color is fixed)
+  )
+
+
+ggsave("overview_barplot.pdf", g, width = 10, height = 10)
+
+```
+
+
+```{r}
+
+# Ensure column names match antibodies correctly
+ mut_score1$Antibody <- "Bamlanivimab"
+ mut_score2$Antibody <- "DBR3_03"
+ mut_score3$Antibody <- "Imdevimab"
+
+# Merge all three datasets
+merged_mut_df <- bind_rows(mut_score1, mut_score2, mut_score3) %>%
+  select(Antibody, Mutations, Mean_Affinity_WT) %>%
+  pivot_wider(names_from = Antibody, values_from = Mean_Affinity_WT)
+
+# Convert to matrix for pheatmap (remove Mutations column)
+heatmap_matrix <- as.matrix(merged_mut_df[,-1])  
+rownames(heatmap_matrix) <- merged_mut_df$Mutations
+
+# Order columns to: Imdevimab → Bamlanivimab → DBR3_03
+desired_order <- c("Imdevimab", "Bamlanivimab", "DBR3_03")
+heatmap_matrix <- heatmap_matrix[, desired_order]
+
+# Define custom color gradient (red → beige → blue)
 my_colors <- colorRampPalette(c("darkred", "beige", "#00518d"))(100)
 
+# Define breaks based on min/max values (without NA)
 heatmap_min <- min(heatmap_matrix, na.rm = TRUE)  
 heatmap_max <- max(heatmap_matrix, na.rm = TRUE)
 breaks_list <- seq(heatmap_min, heatmap_max, length.out = 101)  # Scale from min to max
 
+# Save as PDF
 pdf("pheatmap_mut_affinity.pdf", width = 4, height = 6)  # Adjust size as needed
 
+# Generate the heatmap
 pheatmap(heatmap_matrix,
          color = my_colors,          # Use correct color mapping
          breaks = breaks_list,       # Ensure color scale remains correct
@@ -221,43 +1079,107 @@ pheatmap(heatmap_matrix,
          angle_col = 0,              # Make antibody names horizontal
          border_color = NA)          # Remove grid lines between cells
 dev.off()  # Close the PDF device
+
 ```
 
 ```{r}
-# This code block plots metrics from model training.
-plot_antibody_metrics <- function(data, antibody_name) {
-  # Filter data for the specific antibody
-  df_subset <- data %>% filter(Antibody == antibody_name)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+library(stringr)
+
+plot_synergy_vs_additive <- function(df, binding_site_df, highlight_mutations) {
+  ab_name <- df$antibody[1]
   
-  # Define custom colors for the embeddings
-  embedding_colors <- c("#3963ac", "#08400e", "#a11e5c")
-
-  # Plot
-  p <- ggplot(df_subset, aes(x = Model, y = Spearman_Mean, fill = Embedding)) +
-    geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) + 
-    geom_errorbar(aes(ymin = Spearman_Mean - Spearman_Std, ymax = Spearman_Mean + Spearman_Std),
-                  position = position_dodge(width = 0.8), width = 0.3, size = 0.3) +  # Thinner error bars
-    labs(title = antibody_name,
-         x = "Model",
-         y = "Spearman's correlation coefficient",
-         fill = "Embedding") +
-    theme_minimal() +  # Keeps a clean background while keeping axes visible
+  # Get binding site for this antibody
+  binding_positions <- as.character(binding_site_df[[ab_name]])
+  
+  df_processed <- df %>%
+    mutate(
+      Additive_Affinity = (Individual_Score_1 + Individual_Score_2) / 2,
+      Epistatic_Affinity = Mean_Affinity_WT_2mut,
+      
+      # Parse mutation positions from Combi2
+      Mutation_Positions = str_extract_all(Combi2, "\\d+"),
+      
+      # Check if any mutation is in the binding site
+      Is_Binding_Site = sapply(Mutation_Positions, function(pos) any(pos %in% binding_positions)),
+      
+      # Identify top 2 strongest synergy (lowest fold_change)
+      Is_Top2 = rank(fold_change, ties.method = "first") <= 2,
+      Is_manual = Combi2 == highlight_mutations,
+      # Assign dot color: red (top2), blue (binding site), black (others)
+      Dot_Color = case_when(
+        Is_Top2 ~ "darkorange",
+        Is_manual ~ "yellow",
+        Is_Binding_Site ~ "darkred",
+        TRUE ~ "black"
+      ),
+      
+      # Only label top2
+      Label_Top2 = if_else(Is_Top2, Combi2, NA_character_)
+    )
+  
+   p <- ggplot(df_processed, aes(x = Additive_Affinity, y = Epistatic_Affinity)) +
+    geom_point(aes(color = Dot_Color), alpha = 0.8, size = 2) +
+    scale_color_identity() +  # Use exact colors from Dot_Color
+    geom_abline(slope = 1, intercept = 0, color = "black", linetype = "dashed") +
+    geom_text(
+    data = df_processed %>% filter(!is.na(Label_Top2), is.finite(Additive_Affinity), is.finite(Epistatic_Affinity)),
+    aes(x = Additive_Affinity, y = Epistatic_Affinity, label = Label_Top2),
+  vjust = -1, size = 3, color = "red"
+) +
+    labs(title = ab_name) +
+    coord_cartesian(xlim = c(0, 1.5), ylim = c(0, 1.5), expand = FALSE)+
+    theme_minimal() +
     theme(
-      legend.position = "right",
-      legend.title = element_blank(),
-      plot.title = element_text(hjust = 0.5, face = "bold"),  # Center title
-      axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5, color = "black"),  # X-axis labels horizontal & centered
-      axis.title.x = element_text(margin = margin(t = 10)),  # Space between x-label and x-axis
-      axis.line = element_line(color = "black", size = 0.3),  # Thinner axis lines
-      axis.ticks.y = element_line(size = 0.3),  # Thinner tick marks
-      panel.grid = element_blank()  # Remove grid lines for a cleaner look
-    ) +
-    scale_y_continuous(limits = c(y_min, y_max), breaks = seq(y_min, y_max, by = 0.2)) +
-    scale_fill_manual(values = embedding_colors, guide = guide_legend(override.aes = list(color = NA)))  # Set custom colors for embeddings
-
-  # Save plot as PDF
-  pdf_filename <- paste0("Spearman_", antibody_name, ".pdf")
-  ggsave(pdf_filename, plot = p, width = 8, height = 2.5)
+      axis.title.x = element_blank(),
+      axis.title.y = element_blank(),
+      panel.grid = element_blank()
+    )
+   return(p)
 }
+
+
+```
+
+```{r}
+p1 <- plot_synergy_vs_additive(mut2_score1, binding_site,'E484A Q493R')
+p2 <- plot_synergy_vs_additive(mut2_score2, binding_site)
+p3 <- plot_synergy_vs_additive(mut2_score3, binding_site, 'N501Y S375F')
+
+combined_plot <- wrap_plots(p1, p3, p2, nrow = 1) +
+  plot_annotation(
+    theme = theme(
+      plot.margin = margin(5, 5, 5, 5),
+      axis.title.x = element_text(size = 12, face = "bold"),
+      axis.title.y = element_text(size = 12, face = "bold")
+    ),
+    caption = NULL,
+    title = NULL
+  ) &
+  theme(
+    axis.text = element_text(size = 9),
+    panel.grid = element_blank()
+  ) &
+  labs(x = "Additive affinity", y = "Epistatic affinity")
+combined_plot
+ggsave("synergy_additive_annotated.pdf", combined_plot, width = 15, height = 5)
+
+```
+
+```{r}
+p3
+```
+
+```{r}
+p1
+```
+```{r}
+#here prepare a csv file of mut3_score123 for submissioin as figure is not allowed to exceed 1 A4 paper
+mut3_score123<-rbind(mut3_score1,mut3_score2,mut3_score3)
+colnames(mut3_score123)
+mut3_score123<-mut3_score123[,-2]
+write.csv(mut3_score123,file = "mut3_score123.csv")
 ```
 
