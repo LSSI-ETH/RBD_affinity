@@ -17,7 +17,7 @@ from xgboost import XGBRegressor
 from sklearn.preprocessing import PolynomialFeatures
 import torch
 import matplotlib.pyplot as plt
-from utils import ModelEvaluator
+from utils import ModelEvaluator_fixfold
 import gc  # Garbage collector
 import argparse
 from sklearn.svm import SVR
@@ -119,7 +119,7 @@ data_path = f'/cluster/home/jiahan/SSHPythonProject/antibody_kd_regression/data/
 
 
 tensor_str = f"{task_name}_{embedding}_layer{esm_layer}_{pool_method}pool{pool_axis}"
-embed_str = f"{embedding}_layer{esm_layer}_{pool_method}pool{pool_axis}"
+#embed_str = f"{embedding}_layer{esm_layer}_{pool_method}pool{pool_axis}"
 model_str = f"{y_name}_{tensor_str}_mlpdim{mlp_hidden_dim}_gplen{length_scale}"
 
 df = pd.read_csv(data_path)
@@ -131,17 +131,15 @@ print(f'unique_antibodies:{unique_antibodies}')
 
 Mutations_all = df['Mutations']
 
-plot_dir = f'{now}_{model_str}_gpseed0'
+plot_dir = f'{now}_{model_str}_result'
 if not os.path.exists(plot_dir):
     os.makedirs(plot_dir)
 
-df = pd.read_csv(data_path)
-y_all = df['Mean_Relative_Affinity'].values
 
 X_all = torch.load(f'/cluster/project/reddy/jiahan/{tensor_str}_tensor.pt') 
 print("read X in")
 print(X_all.shape)
-
+folds_all = df['fold_random_5'].values
 # Initialize metrics dataframe
 metrics_df = pd.DataFrame()
 
@@ -150,8 +148,10 @@ for antibody in unique_antibodies:
     mask = (df['Antibody'] == antibody).values
     X = X_all[mask]
     y = y_all[mask]
-    mutations = Mutations_all[mask]
 
+    mutations = Mutations_all[mask]
+    folds = folds_all[mask]
+    
     for cfg in model_configs:
         if cfg["enabled"]:
             print(f"\nNow evaluating: {cfg['name']}")
@@ -164,9 +164,10 @@ for antibody in unique_antibodies:
                 else:
                     print("Not using poly")
                 
-            evaluator = ModelEvaluator(
+            evaluator = ModelEvaluator_fixfold(
                         X=X,
                         y=y,
+                        folds=folds,
                         model=cfg["model"],
                         model_name=cfg["name"],
                         plot_dir=plot_dir,
