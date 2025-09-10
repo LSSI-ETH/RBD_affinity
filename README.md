@@ -1,6 +1,6 @@
 # RBD_affinity
 
-Repo for code used in colab with Sebastian Maerkl.
+Repo for code used for manuscript "High-throughput cell-free profiling of SARS-CoV-2 RBD variants enables rapid and quantitative in vitro affinity landscape mapping revealing antibody escape patterns".
 
 High throughput RBD affinity measurement & modeling
 
