@@ -1,28 +1,11 @@
 ---
-title: "EPFL_3mut_combi"
+title: "data analysis for RBD affinity on triple mutation variants.\"
 author: "hjm"
 date: "2024-04-24"
 output: html_document
 ---
 
-This file is for exploring the relative affinity data on all n=3 combinations of Omicron BA.1 mutations. WT and Omicron were also tested as a reference.
-
-From Sai: 
-1. Which residues are the most important in terms of leading to affinity losses
-2. whether there are higher order (synergistic) interactions amongst residues, 
-3. whether there is a difference between the antibodies in terms of being more or less susceptible to binding, and 
-4. if possible to maybe learn what the possible evolutionary trajectories might be (although that is probably not possible?).
-5. We may want to also think about how to use this data for an ML regression model to predict affinity?
-
 Let's break it into parts.
-
-```{r}
-#read data
-df_bam<-read.delim(file = "mutations_bamlanivimab.txt",sep = ",")
-df_DBR3<-read.delim(file = "mutations_DBR3.txt",sep = ",")
-df_imd<-read.delim(file = "mutations_imdevimab.txt",sep = ",")
-#shunxu: 1 3 2
-```
 
 ```{r}
 source("RBD_tree_functions.R")
@@ -37,6 +20,15 @@ library(igraph)
 library(tidyverse)
 library(scales)
 library(qgraph)
+library(pheatmap)
+```
+
+```{r}
+#read data
+df_bam<-read.delim(file = "mutations_bamlanivimab.txt",sep = ",")
+df_DBR3<-read.delim(file = "mutations_DBR3.txt",sep = ",")
+df_imd<-read.delim(file = "mutations_imdevimab.txt",sep = ",")
+#shunxu: 1 3 2
 ```
 
 ```{r}
@@ -462,53 +454,6 @@ g
 ggsave("violin_foldchange.pdf", g, width = 8, height = 4)
 ```
 
-```{r}
-# Create the box plot
-ggplot(combined_data, aes(x = Antibody, y = fold_change, fill = Antibody)) +
-  geom_boxplot(outlier.color = "red", outlier.shape = 16, outlier.size = 2, color = "black") +
-  labs(title = "Fold Change Distribution by Antibody (Box Plot)",
-       x = "Antibody",
-       y = "Fold Change") +
-  theme_minimal() +
-  scale_x_discrete(limits = c("Bamlanivimab", "Imdevimab", "DBR3")) +  # Ensure the desired x-axis order
-  theme(
-    legend.position = "none",  # Remove legend
-    axis.text.x = element_text(angle = 45, hjust = 1)  # Rotate x-axis labels if needed
-  )
-```
-
-```{r}
-# think about comparison accross mabs.
-# some mabs more suseptible? how to make this conclusion?
-# evaluate on 3-mer basis
-# if we are looking at the fold change then there is no need to normalise across the mabs.
-#
-
-# Merge the dataframes by 'Mutation'
-combined_mut3_score <- merge(merge(mut3_score1, mut3_score2, by = "Mutations", all = TRUE), mut3_score3, by = "Mutations", all = TRUE)
-
-# Reorder columns and rename fold_change columns
-combined_mut3_score <- combined_mut3_score[, c("Mutations", "fold_change.x", "fold_change.y", "fold_change")]
-colnames(combined_mut3_score) <- c("Mutation", "fold_change_bamlanivimab", "fold_change_DBR3", "fold_change_imdevimab")
-
-
-long_data<- combined_mut3_score %>%
-  select(Mutations, fold_change.x, fold_change.y, fold_change,
-         antibody.x, antibody.y, antibody) %>%
-  rename(fold_change.z = fold_change,
-         antibody.z = antibody) %>%
-  filter(fold_change < 1) %>%
-  pivot_longer(
-    cols = -Mutations,  # Exclude Mutations from the pivot
-    names_to = c(".value", "set"),  # Split the column names based on pattern
-    names_pattern = "(.*)\\.(.)"  # Use regex to separate the fold_change and antibody names
-  ) %>%
-  select(Mutations, fold_change, antibody)
-  
-
-anova_result <- aov(fold_change ~ antibody, data = long_data)
-summary(anova_result)
-```
 
 ```{r}
 
@@ -522,13 +467,19 @@ combined_data <- bind_rows(mut3_score1, mut3_score2, mut3_score3)
 
 # Reshape the data (optional since the combined_data is already tidy)
 # This ensures the columns are Mutation, fold_change, and Antibody
-long_data <- combined_data %>% 
-   filter(Mean_Affinity_WT_3mut < 1) %>% 
-  select(Mutations, Mean_Affinity_WT_3mut, Antibody)
+# make sure the mutations in three antibodies are the same
+long_data <- combined_data %>%
+  select(Mutations, Mean_Affinity_WT_3mut, Antibody) %>%
+  drop_na() %>%
+  group_by(Mutations) %>%
+  filter(n_distinct(Antibody) == 3) %>%  # keep only triples seen in all 3
+  ungroup()
+
 
 # Perform ANOVA
 anova_result <- aov(Mean_Affinity_WT_3mut ~ Antibody, data = long_data)
-
+# Test ANOVA assumption
+plot(anova_result)
 # Print ANOVA summary
 summary(anova_result)
 
@@ -543,24 +494,8 @@ plot(tukey_result)
 
 ```
 
-```{r}
-#this test didn't assume normalisation. But gives similar results.
-kruskal_result <- kruskal.test(fold_change ~ antibody, data = long_data)
-print(kruskal_result)
-```
-```{r}
-TukeyHSD(anova_result)
-```
 
 ```{r}
-
-library(multcomp)
-pairwise.wilcox.test(long_data$fold_change, long_data$antibody, p.adjust.method = "BH")
-
-```
-
-```{r}
-#ok did analysis on 3 mutation behavior of the 3 mabs and we found similarity between ly555 and regn33, the 
 mut3_score1$antibody <- "bamlanivimab"
 mut3_score2$antibody <- "DBR3"
 mut3_score3$antibody <- "imdevimab"
@@ -591,6 +526,7 @@ length(apply(combined_mut3_score,1,function(x) any(is.na(x)))) - sum(apply(combi
 # number of 3-mut combinations present in every mab dataset
 
 ```
+
 ```{r}
 binding_site<-read.csv("EPFLbindingsite.csv")
 
@@ -609,8 +545,6 @@ correct(mut2_score3)
 ```{r}
 
 plot_network <- function(mut2_score, binding_site) {
-  
-
   
   # Extract the antibody name from the input dataframe
   antibody_name <- unique(mut2_score$antibody)
@@ -691,9 +625,10 @@ g3<-plot_network(mut2_score3,binding_site)
 
 par(mfrow = c(1, 3))
 
-plot_qgraph(g3) #im
+
 plot_qgraph(g1) #bam
 plot_qgraph(g2) #DBR3
+plot_qgraph(g3) #im
 
 
 ```
@@ -716,55 +651,9 @@ legend("topright",               # Position of the legend
        bty = "n") 
 dev.off()
 ```
-```{r}
-color_palette <- colorRampPalette(c("beige", "red"))
-normalized_widths <- (E(g)$width - min(E(g)$width)) / (max(E(g)$width) - min(E(g)$width))
-# Apply color palette
-E(g)$color <- color_palette(length(E(g)$width))[order(-normalized_widths)]
-plot(g)
-```
 
-```{r}
-plot(g)
-legend("topright",               # Position of the legend
-       legend = names(category_colors),  # Labels for the legend
-       col = category_colors,     # Colors used in the legend
-       pch = 16,                  # Type of point to use, 16 is a filled circle
-       pt.cex = 1.5,              # Point size
-       cex = 0.8,                 # Font size of text
-       bty = "n") 
-```
 
-```{r}
-# plot heatmap for overview of data to replace fig2A.
-# align variants, 3 columns tobe 3 binders,
-# color  being normalised values.
-# Merge all three data frames
-merged_df123 <- bind_rows(df1, df2, df3) %>%
-  group_by(Antibody, Variant) %>%
-  summarise(Mean_Relative_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # Take the mean
-  pivot_wider(names_from = Antibody, values_from = Mean_Relative_Affinity)  # Convert to wide format
 
-# Replace NAs with 0 or another suitable value (if needed)
-merged_df[is.na(merged_df)] <- 0
-
-# Convert to matrix for pheatmap (remove Variant column)
-heatmap_matrix <- as.matrix(merged_df[,-1])  
-rownames(heatmap_matrix) <- merged_df$Variant
-
-# Define custom color gradient (red → beige → blue)
-my_colors <- colorRampPalette(c("red", "beige", "blue"))(100)
-
-# Generate the heatmap
-pheatmap(heatmap_matrix,
-         color = my_colors,
-         cluster_rows = TRUE,  # Cluster similar variants
-         cluster_cols = TRUE,  # Cluster antibodies
-         scale = "none",       # Don't normalize data
-         main = "Mean Relative Affinity Across Variants",
-         fontsize = 10)  # Adjust font size if needed
-
-```
 
 ```{r}
 duplicates <- bind_rows(df1, df2, df3) %>%
@@ -775,6 +664,7 @@ duplicates <- bind_rows(df1, df2, df3) %>%
 # Display duplicates
 print(duplicates)
 ```
+
 ```{r}
 normalize_variant <- function(variant) {
   if (variant %in% c("o", "o_1", "o_2")) {
@@ -783,7 +673,7 @@ normalize_variant <- function(variant) {
     return(variant)
   }
 }
-library(pheatmap)
+
 merged_df123 <- bind_rows(df1, df2, df3) %>%
   mutate(Variant = sapply(Variant, normalize_variant)) %>%  # Standardize variant names
   group_by(Antibody, Variant) %>%
@@ -884,7 +774,10 @@ dev.off()  # Close the PDF device
 
 
 ```
+
 ```{r}
+
+#plotting the lengend
 breaks_list <- seq(0, 2, length.out = 51) 
 my_colors <- colorRampPalette(c("darkred", "beige", "#00518d"))(50) # Scale from min to max
 # Save as PDF
@@ -906,74 +799,11 @@ pheatmap(heatmap_matrix,
 
 dev.off()
 ```
-```{r figure2.1 option A}
-library(dplyr)
-library(tidyr)
-library(ggplot2)
-library(patchwork)  # for arranging g1 / g2 / g3 on one page
-
-# 0) Build the global original order: df1 -> df2 -> df3 (after normalization)
-variant_order <- bind_rows(
-  df1 %>% mutate(Variant = sapply(Variant, normalize_variant)),
-  df2 %>% mutate(Variant = sapply(Variant, normalize_variant)),
-  df3 %>% mutate(Variant = sapply(Variant, normalize_variant))
-) %>%
-  mutate(.row = row_number()) %>%
-  arrange(.row) %>%
-  distinct(Variant, .keep_all = TRUE) %>%
-  pull(Variant)
-
-# Helper to make one barplot from a single df without merging
-make_plot <- function(dfi, default_title) {
-  # Try to use the Antibody name as title (if the column exists & is a single value)
-  title_txt <- default_title
-  if ("Antibody" %in% names(dfi)) {
-    ab <- unique(dfi$Antibody)
-    if (length(ab) == 1 && !is.na(ab)) title_txt <- paste0(ab, " (Centered at WT=0)")
-  }
-
-  d_plot <- dfi %>%
-    mutate(Variant = sapply(Variant, normalize_variant)) %>%     # normalize
-    group_by(Variant) %>%
-    summarise(Mean_Affinity = mean(Mean_Relative_Affinity, na.rm = TRUE), .groups = "drop") %>%  # mean of duplicates
-    mutate(
-      Variant = factor(Variant, levels = variant_order),         # original global order
-      Mean_Affinity = Mean_Affinity - 1                          # center at WT=1
-    )
-
-  ggplot(d_plot, aes(x = Variant, y = Mean_Affinity, fill = "#00518d")) +
-    geom_bar(stat = "identity", width = 0.7) +
-    theme_minimal() +
-    scale_fill_identity() +
-    scale_y_continuous(limits = c(-2, 2)) +
-    labs(
-      title = title_txt,
-      x = "Variant",
-      y = "Mean Relative Affinity (delta from WT)"
-    ) +
-    theme(
-      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 8),
-      axis.text.y = element_text(size = 10),
-      strip.text = element_text(size = 12, face = "bold"),
-      panel.grid.major = element_blank(),
-      panel.grid.minor = element_blank(),
-      legend.position = "none"
-    )
-}
-
-# 1) Make the three plots (titles fall back to df1/df2/df3 if no single Antibody value)
-g1 <- make_plot(df1, "df1 (Centered at WT=1)")
-g2 <- make_plot(df2, "df2 (Centered at WT=1)")
-g3 <- make_plot(df3, "df3 (Centered at WT=1)")
-
-# 2) Put 3 barplots together on one page and save
-combined <- g1 / g2 / g3  # stacked vertically; use (g1 | g2 | g3) for horizontal
-ggsave("overview_barplots_original_order_singlepage.pdf", combined, width = 12, height = 12)
 
 
-```
 
-```{r Figure2.1 3 targets in consistent order}
+```{r}
+#Figure2A 3 targets in consistent order
 merged_df123 <- bind_rows(df1, df2, df3) %>%
   mutate(Variant = sapply(Variant, normalize_variant)) %>%  # Standardize variant names
   group_by(Antibody, Variant) %>%
@@ -1140,7 +970,6 @@ plot_synergy_vs_additive <- function(df, binding_site_df, highlight_mutations) {
    return(p)
 }
 
-
 ```
 
 ```{r}
@@ -1168,18 +997,115 @@ ggsave("synergy_additive_annotated.pdf", combined_plot, width = 15, height = 5)
 
 ```
 
-```{r}
-p3
-```
 
 ```{r}
-p1
-```
-```{r}
-#here prepare a csv file of mut3_score123 for submissioin as figure is not allowed to exceed 1 A4 paper
+#here prepare a csv file of triple_mutation_synergy.csv
 mut3_score123<-rbind(mut3_score1,mut3_score2,mut3_score3)
 colnames(mut3_score123)
 mut3_score123<-mut3_score123[,-2]
-write.csv(mut3_score123,file = "mut3_score123.csv")
+write.csv(mut3_score123,file = "triple_mutation_synergy.csv")
+```
+
+```{r}
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(rlang)
+
+# --- normalize Variant: collapse o_* -> "o" (case-insensitive), keep others as-is
+normalize_variant <- function(v) {
+  out <- v
+  out[grepl("^o(_\\d+)?$", v, ignore.case = TRUE)] <- "o"
+  out
+}
+
+infer_master <- function(df1, df2, df3, variants_540 = NULL) {
+  if (!is.null(variants_540)) {
+    master <- c(variants_540, "wt", "o")
+  } else {
+    pooled <- c(df1$Variant, df2$Variant, df3$Variant)
+    pooled <- normalize_variant(pooled)
+    master <- unique(c(pooled, "wt", "o"))
+    message(sprintf("Inferred %d unique variants incl. wt/o (expected 542 including wt+o).",
+                    length(master)))
+  }
+  # enforce unique and return as character
+  unique(as.character(master))
+}
+
+# --- summarize one df into 5 bins over the master variant set
+prep_counts <- function(df, variant_master) {
+  df %>%
+    mutate(Variant = normalize_variant(Variant),
+           rep_count = dplyr::coalesce(as.integer(Replicates), 0L)) %>%
+    group_by(Variant) %>%
+    summarise(rep_count = max(rep_count), .groups = "drop") %>%
+    right_join(tibble(Variant = variant_master), by = "Variant") %>%
+    mutate(rep_count = dplyr::coalesce(rep_count, 0L)) %>%
+    # keep only bins 0..4; everything else is ignored per your spec
+    mutate(rep_bin = pmin(rep_count, 4L)) %>%
+    count(rep_bin, name = "n_variants") %>%
+    complete(rep_bin = 0:4, fill = list(n_variants = 0L)) %>%
+    mutate(
+      category = factor(dplyr::case_when(
+        rep_bin == 4 ~ "4 repeats",
+        rep_bin == 3 ~ "3 repeats",
+        rep_bin == 2 ~ "2 repeats",
+        rep_bin == 1 ~ "1 repeat",
+        TRUE         ~ "0 repeats"
+      ), levels = c("4 repeats","3 repeats","2 repeats","1 repeat","0 repeats")),
+      perc = n_variants / sum(n_variants)
+    )
+}
+
+# --- pie plot helper
+plot_pie <- function(count_df, title = "") {
+  ggplot(count_df, aes(x = "", y = n_variants, fill = category)) +
+    geom_col(width = 1, color = "white") +
+    coord_polar(theta = "y") +
+    # add labels at the middle of each slice
+    geom_text(aes(label = n_variants),
+              position = position_stack(vjust = 0.5),
+              color = "black", size = 4) +
+    labs(title = title, fill = NULL) +
+    theme_void() +
+    theme(plot.title = element_text(hjust = 0.5))
+}
+
+
+# =========================
+# Run it for df1 / df2 / df3
+# =========================
+
+# 1) Build the master list (replace NULL with your `variants_540` if you have it)
+variant_master <- infer_master(df1, df2, df3, variants_540 = NULL)
+
+# Quick sanity check:
+if (length(variant_master) != 542) {
+  message(sprintf("Note: variant_master has %d entries (ideal is 542 = 540 + wt + o).",
+                  length(variant_master)))
+  # Optionally stop here:
+  # stop("Master variant list size mismatch.")
+}
+
+# 2) Summarize each binder
+c1 <- prep_counts(df1, variant_master)
+c2 <- prep_counts(df2, variant_master)
+c3 <- prep_counts(df3, variant_master)
+
+# 3) Titles: use Antibody if single-valued, else fallback
+title_or <- function(df, fallback) {
+  lab <- unique(na.omit(df$Antibody))
+  if (length(lab) == 1) as.character(lab) else fallback
+}
+p1 <- plot_pie(c1, title_or(df1, "Binder 1"))
+p2 <- plot_pie(c2, title_or(df2, "Binder 2"))
+p3 <- plot_pie(c3, title_or(df3, "Binder 3"))
+
+# 4) Show side-by-side (or save)
+p1 + p2 + p3
+ggsave("binder_repeat_pies.pdf", p1 + p2 + p3, width = 12, height = 5)
 ```
 
