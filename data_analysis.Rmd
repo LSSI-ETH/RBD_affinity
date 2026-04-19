@@ -528,7 +528,7 @@ length(apply(combined_mut3_score,1,function(x) any(is.na(x)))) - sum(apply(combi
 ```
 
 ```{r}
-binding_site<-read.csv("EPFLbindingsite.csv")
+binding_site<-read.csv("bindingsite.csv")
 
 
 correct<-function(mut2_score){
