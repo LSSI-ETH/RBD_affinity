@@ -224,6 +224,155 @@ def plot_spearman_by_n_mut(
 
 
 # ---------------------------------------------------------------------------
+# Scatter plot: predicted vs measured, coloured by n_mut
+# ---------------------------------------------------------------------------
+
+def plot_scatter_by_n_mut(
+    results_dfs: dict,
+    model_name: str,
+    embedding_type: str,
+    output_dir: str,
+    true_cutoff: float = 0.85,
+    pred_cutoff: float = 0.75,
+) -> None:
+    """
+    For each antibody, plot predicted vs measured relative affinity coloured by
+    mutation count (n_mut), with an identity line and optional threshold lines.
+
+    Each point is one sequence. Colour gradient runs from deep navy (low n_mut)
+    through pale silver to blood red (high n_mut, capped at 11 → '>10').
+
+    Parameters
+    ----------
+    results_dfs : dict
+        {antibody: DataFrame} with columns 'relative_affinity',
+        'pred_{model_name}', and 'n_mut'.
+    model_name : str
+        Name of the model whose predictions to plot.
+    embedding_type : str
+        Embedding label used in output filenames.
+    output_dir : str
+        Directory where PDF figures are saved.
+    true_cutoff : float
+        Horizontal dashed line marking the binder/non-binder threshold in the
+        ground truth (default 0.85).
+    pred_cutoff : float
+        Vertical dashed line marking the binder/non-binder threshold in
+        predictions (default 0.75).
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+
+    pred_col   = f"pred_{model_name}"
+    target_col = "relative_affinity"
+
+    # Navy → silver → blood-red gradient mapped to n_mut
+    cmap = LinearSegmentedColormap.from_list(
+        "n_mut_gradient", ["#001f3f", "#e0e0e0", "#8b0000"]
+    )
+
+    for antibody, df in results_dfs.items():
+        work_df = df.copy()
+
+        # Keep only clean rows if the flag column exists
+        if "is_clean" in work_df.columns:
+            work_df = work_df[work_df["is_clean"] == True]
+
+        work_df = work_df.dropna(subset=[target_col, pred_col])
+
+        if work_df.empty:
+            print(f"  [Skip scatter] No valid data for {antibody} / {model_name}")
+            continue
+
+        # Cap n_mut at 11 so '>10' sequences still get the deepest red
+        work_df["color_group"] = work_df["n_mut"].clip(upper=11)
+
+        # ── Axis limits: independent per axis, 5 % padding ──────────────────
+        def padded_lims(series: pd.Series):
+            lo, hi = series.min(), series.max()
+            pad = (hi - lo) * 0.05
+            return lo - pad, hi + pad
+
+        x_lims = padded_lims(work_df[target_col])
+        y_lims = padded_lims(work_df[pred_col])
+
+        # Identity line spans the full union of both axes
+        diag_min = min(x_lims[0], y_lims[0])
+        diag_max = max(x_lims[1], y_lims[1])
+
+        # ── Figure ───────────────────────────────────────────────────────────
+        fig, ax = plt.subplots(figsize=(6, 6))
+
+        sc = ax.scatter(
+            work_df[target_col],
+            work_df[pred_col],
+            c=work_df["color_group"],
+            cmap=cmap,
+            s=12,
+            alpha=0.55,
+            edgecolors="none",
+            zorder=2,
+        )
+
+        # Identity line (x = y)
+        ax.plot(
+            [diag_min, diag_max],
+            [diag_min, diag_max],
+            color="black",
+            linewidth=0.8,
+            linestyle="--",
+            alpha=0.6,
+            zorder=1,
+            label="$y = x$",
+        )
+
+        # Optional threshold lines
+        ax.axhline(pred_cutoff,  color="gray", linestyle=":", linewidth=0.6, alpha=0.7)
+        ax.axvline(true_cutoff,  color="gray", linestyle=":", linewidth=0.6, alpha=0.7)
+
+        # ── Colourbar ────────────────────────────────────────────────────────
+        cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+        cbar.outline.set_linewidth(0.4)
+        cbar.ax.tick_params(width=0.4, labelsize=9)
+
+        # Replace the '11' tick label with '>10'
+        cbar_ticks = cbar.get_ticks()
+        cbar.set_ticks(cbar_ticks)
+        cbar.set_ticklabels([
+            ">10" if abs(t - 11) < 0.5 else str(int(t))
+            for t in cbar_ticks
+        ])
+        cbar.set_label("$n_{mut}$", rotation=270, labelpad=15, fontsize=11)
+
+        # ── Aesthetics ───────────────────────────────────────────────────────
+        ax.set_box_aspect(1)
+        ax.set_xlim(x_lims)
+        ax.set_ylim(y_lims)
+        ax.set_facecolor("white")
+        ax.grid(False)
+        ax.spines[["top", "right"]].set_visible(False)
+        for spine in ["left", "bottom"]:
+            ax.spines[spine].set_linewidth(0.4)
+            ax.spines[spine].set_color("black")
+        ax.tick_params(axis="both", which="major", labelsize=11, width=0.4, color="black")
+
+        ax.set_title(
+            f"{antibody} — {model_name} ({embedding_type})",
+            fontsize=13, fontweight="bold", pad=12,
+        )
+        ax.set_xlabel("Measured relative affinity ($y_{true}$)", fontsize=11, labelpad=8)
+        ax.set_ylabel("Predicted relative affinity ($y_{pred}$)", fontsize=11, labelpad=8)
+
+        plt.tight_layout()
+        out_file = os.path.join(
+            output_dir,
+            f"moulana_scatter_{antibody}_{model_name}_{embedding_type}.pdf",
+        )
+        fig.savefig(out_file, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved: {out_file}")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -259,6 +408,13 @@ def parse_args():
     parser.add_argument(
         "--output_dir", default="./results",
         help="Directory where output CSVs and plots are saved (default: ./results).",
+    )
+    parser.add_argument(
+        "--scatter_model", default="SVM_linear",
+        help=(
+            "Model to use for the predicted-vs-measured scatter plot "
+            "(default: SVM_linear). Must match a name in TARGET_MODELS."
+        ),
     )
     parser.add_argument(
         "--skip_plots", action="store_true",
@@ -321,10 +477,21 @@ def main():
     if not args.skip_plots:
         print("\n=== Generating plots ===")
         sns.set(style="whitegrid")
+
+        # Bar charts: Spearman by mutation count group
         for antibody in metrics_df["Antibody"].unique():
             plot_spearman_by_n_mut(
                 metrics_df, antibody, args.embedding, args.output_dir
             )
+
+        # Scatter plots: predicted vs measured, coloured by n_mut
+        print(f"\n=== Scatter plots (model: {args.scatter_model}) ===")
+        plot_scatter_by_n_mut(
+            results_dfs,
+            model_name=args.scatter_model,
+            embedding_type=args.embedding,
+            output_dir=args.output_dir,
+        )
 
     print("\nDone.")
 
